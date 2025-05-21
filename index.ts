@@ -1,12 +1,11 @@
 import { Connection, Keypair, PublicKey, ParsedTransactionWithMeta, ComputeBudgetProgram, Transaction } from '@solana/web3.js';
-import { PumpSwapSDK } from '@pump-fun/pump-swap-sdk';
+import { PumpAmmSdk, Direction } from '@pump-fun/pump-swap-sdk';
 import axios from 'axios';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs/promises';
 import { watch } from 'fs';
 import Sentiment from 'sentiment';
 import twilio from 'twilio';
-import * as tf from '@tensorflow/tfjs-node';
 import { IDL, Pump } from './pump_idl';
 
 // Load environment variables
@@ -39,8 +38,6 @@ let priorityFeeMicroLamports = parseFloat(process.env.PRIORITY_FEE_MICROLAMPORTS
 let xSearchIntervalMinutes = parseFloat(process.env.X_SEARCH_INTERVAL_MINUTES || '5');
 let xSentimentThreshold = parseFloat(process.env.X_SENTIMENT_THRESHOLD || '0.5');
 let minCreatorScore = parseFloat(process.env.MIN_CREATOR_SCORE || '0.5');
-let aiModelWeight = parseFloat(process.env.AI_MODEL_WEIGHT || '0.8');
-let analyticsIntervalMinutes = parseFloat(process.env.ANALYTICS_INTERVAL_MINUTES || '5');
 let emergencyStop = process.env.EMERGENCY_STOP === 'true';
 let twilioEnabled = process.env.TWILIO_ENABLED === 'true';
 let blacklistMints: string[] = [];
@@ -52,7 +49,7 @@ let wallets: Keypair[] = (process.env.WALLET_PRIVATE_KEY || '').split(',').map(k
 const connection = new Connection(QUICKNODE_RPC, 'confirmed');
 
 // Initialize Pump Swap SDK
-const pumpSwapSDK = new PumpSwapSDK(connection, wallets[0]);
+const pumpAmmSdk = new PumpAmmSdk();
 
 // Initialize Twilio client
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -90,17 +87,15 @@ async function loadConfig() {
     xSearchIntervalMinutes = config.xSearchIntervalMinutes || xSearchIntervalMinutes;
     xSentimentThreshold = config.xSentimentThreshold || xSentimentThreshold;
     minCreatorScore = config.minCreatorScore || minCreatorScore;
-    aiModelWeight = config.aiModelWeight || aiModelWeight;
-    analyticsIntervalMinutes = config.analyticsIntervalMinutes || analyticsIntervalMinutes;
     emergencyStop = config.emergencyStop || emergencyStop;
     twilioEnabled = config.twilioEnabled || twilioEnabled;
     blacklistMints = config.blacklistMints || blacklistMints;
     blacklistCreators = config.blacklistCreators || blacklistCreators;
     whitelistMints = config.whitelistMints || whitelistMints;
     wallets = config.wallets ? config.wallets.map((key: string) => Keypair.fromSecretKey(Buffer.from(key, 'base64'))) : wallets;
-    await log(`Config updated: buy=${buyAmountSol}, sell=${sellTargetSol}, stop-loss=${stopLossPercent}%, timeout=${timeoutMinutes}min, trailing=${trailingStopPercent}%, priority=${priorityFeeMicroLamports}, xInterval=${xSearchIntervalMinutes}min, xSentiment=${xSentimentThreshold}, creatorScore=${minCreatorScore}, aiWeight=${aiModelWeight}, analytics=${analyticsIntervalMinutes}min, emergency=${emergencyStop}, twilio=${twilioEnabled}`);
+    await log(`Config updated: buy=${buyAmountSol}, sell=${sellTargetSol}, stop-loss=${stopLossPercent}%, timeout=${timeoutMinutes}min, trailing=${trailingStopPercent}%, priority=${priorityFeeMicroLamports}, xInterval=${xSearchIntervalMinutes}min, xSentiment=${xSentimentThreshold}, creatorScore=${minCreatorScore}, emergency=${emergencyStop}, twilio=${twilioEnabled}`);
   } catch (error) {
-    await log(`Error loading config: ${error}. Using defaults`);
+    await log(`Error loading config: ${error}`);
   }
 }
 
@@ -122,7 +117,8 @@ async function loadCreatorScores() {
     creatorScores = new Map(JSON.parse(data));
     await log('Loaded creator scores');
   } catch (error) {
-    await log(`Error loading creator scores: ${error}. Starting with empty scores`);
+    await log(`Error loading creator scores: ${error}`);
+    Starting with empty scores`);
   }
 }
 
@@ -132,38 +128,6 @@ async function saveCreatorScores() {
     await log('Saved creator scores');
   } catch (error) {
     await log(`Error saving creator scores: ${error}`);
-  }
-}
-
-// AI model for predictions (placeholder)
-let aiModel: tf.LayersModel | null = null;
-
-async function loadAIModel() {
-  try {
-    aiModel = tf.sequential();
-    aiModel.add(tf.layers.dense({ units: 1, inputShape: [3], activation: 'sigmoid' }));
-    aiModel.compile({ optimizer: 'adam', loss: 'binaryCrossentropy' });
-    const xs = tf.tensor2d([[10, 100, 0.5], [20, 200, 0.7], [5, 50, 0.3]], [3, 3]);
-    const ys = tf.tensor2d([[1], [1], [0]], [3, 1]);
-    await aiModel.fit(xs, ys, { epochs: 10 });
-    await log('Loaded AI model');
-  } catch (error) {
-    await log(`Error loading AI model: ${error}`);
-  }
-}
-
-async function predictTokenSuccess(liquidity: number, holderCount: number, sentimentScore: number): Promise<number> {
-  if (!aiModel) return 0;
-  try {
-    const input = tf.tensor2d([[liquidity, holderCount, sentimentScore]], [1, 3]);
-    const prediction = aiModel.predict(input) as tf.Tensor;
-    const score = (await prediction.data())[0];
-    input.dispose();
-    prediction.dispose();
-    return score;
-  } catch (error) {
-    await log(`Error predicting token success: ${error}`);
-    return 0;
   }
 }
 
@@ -263,7 +227,10 @@ async function monitorNewTokens() {
       }
     },
     'confirmed'
-  );
+  ).catch((error) => {
+    log(`Main subscription error: ${error}`);
+    setTimeout(monitorNewTokens, 5000);
+  });
 
   const bondingSubscriptionId = connection.onProgramAccountChange(
     BONDING_CURVE_PROGRAM,
@@ -284,7 +251,10 @@ async function monitorNewTokens() {
       }
     },
     'confirmed'
-  );
+  ).catch((error) => {
+    log(`Bonding curve subscription error: ${error}`);
+    setTimeout(monitorNewTokens, 5000);
+  });
 
   const amaSubscriptionId = connection.onProgramAccountChange(
     AMA_PROGRAM,
@@ -305,17 +275,7 @@ async function monitorNewTokens() {
       }
     },
     'confirmed'
-  );
-
-  connection.onSubscriptionError(mainSubscriptionId, (error) => {
-    log(`Main subscription error: ${error}`);
-    setTimeout(monitorNewTokens, 5000);
-  });
-  connection.onSubscriptionError(bondingSubscriptionId, (error) => {
-    log(`Bonding curve subscription error: ${error}`);
-    setTimeout(monitorNewTokens, 5000);
-  });
-  connection.onSubscriptionError(amaSubscriptionId, (error) => {
+  ).catch((error) => {
     log(`AMA subscription error: ${error}`);
     setTimeout(monitorNewTokens, 5000);
   });
@@ -324,10 +284,11 @@ async function monitorNewTokens() {
 // Check if transaction is a 'create' instruction
 function isCreateInstruction(tx: ParsedTransactionWithMeta): boolean {
   const instructions = tx.transaction.message.instructions;
-  return instructions.some((ix: any) => {
+  return instructions.some(ix => {
     return (
+      'programId' in ix &&
       ix.programId.equals(PUMP_FUN_PROGRAM) &&
-      ix.data &&
+      'data' in ix &&
       Buffer.from(ix.data, 'base64').slice(0, 8).equals(Buffer.from(IDL.instructions[0].discriminator))
     );
   });
@@ -336,8 +297,8 @@ function isCreateInstruction(tx: ParsedTransactionWithMeta): boolean {
 // Extract mint from main program transaction
 function extractMintFromTransaction(tx: ParsedTransactionWithMeta): PublicKey | null {
   const instructions = tx.transaction.message.instructions;
-  for (const ix: any of instructions) {
-    if (ix.programId.equals(PUMP_FUN_PROGRAM) && ix.accounts) {
+  for (const ix of instructions) {
+    if ('programId' in ix && ix.programId.equals(PUMP_FUN_PROGRAM) && 'accounts' in ix && ix.accounts.length > 0) {
       return new PublicKey(ix.accounts[0]);
     }
   }
@@ -347,8 +308,8 @@ function extractMintFromTransaction(tx: ParsedTransactionWithMeta): PublicKey | 
 // Extract mint from generic program transaction
 function extractMintFromTransactionGeneric(tx: ParsedTransactionWithMeta, programId: PublicKey): PublicKey | null {
   const instructions = tx.transaction.message.instructions;
-  for (const ix: any of instructions) {
-    if (ix.programId.equals(programId) && ix.accounts) {
+  for (const ix of instructions) {
+    if ('programId' in ix && ix.programId.equals(programId) && 'accounts' in ix && ix.accounts.length > 0) {
       return new PublicKey(ix.accounts[0]);
     }
   }
@@ -488,7 +449,7 @@ async function retry<T>(fn: () => Promise<T>, retries: number = 3, delay: number
   return null;
 }
 
-// Fetch swap quote using Metis API
+// Fetch swap quote using Metis API (placeholder, replace with actual pool logic)
 async function getSwapQuote(tokenMint: PublicKey, amountIn: number): Promise<any> {
   return await retry(async () => {
     const response = await axios.post(QUICKNODE_METIS_API, {
@@ -513,24 +474,38 @@ async function getTokenPrice(tokenMint: PublicKey, amount: number): Promise<numb
 // Execute buy swap with priority fee
 async function executeBuy(tokenMint: PublicKey, wallet: Keypair): Promise<string | null> {
   return await retry(async () => {
+    await log(`Starting buy for ${tokenMint.toString()}`);
     const quote = await getSwapQuote(tokenMint, buyAmountSol);
     if (!quote || quote.liquidity < MIN_LIQUIDITY * 1e9) {
       await log(`Skipping ${tokenMint.toString()}: Insufficient liquidity (${(quote?.liquidity / 1e9) || 0} SOL)`);
       return null;
     }
 
+    // Placeholder: Replace with actual pool fetching logic
+    const pool = { mint: tokenMint }; // Need to fetch actual pool data
+    const baseAmount = await pumpAmmSdk.swapAutocompleteBaseFromQuote(
+      pool,
+      buyAmountSol * 1e9,
+      500,
+      Direction.QuoteToBase
+    );
     const priorityFee = await getDynamicPriorityFee();
+    await log(`Preparing transaction with priority fee: ${priorityFee}`);
+    const swapInstructions = await pumpAmmSdk.swapInstructions(
+      pool,
+      baseAmount,
+      500,
+      Direction.QuoteToBase,
+      wallet.publicKey
+    );
     const tx = new Transaction().add(
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-      await pumpSwapSDK.swap({
-        tokenMint,
-        amountIn: buyAmountSol * 1e9,
-        minAmountOut: quote.minAmountOut,
-        slippageBps: 500,
-      })
+      ...swapInstructions
     );
 
+    await log(`Sending buy transaction for ${tokenMint.toString()}`);
     const signature = await connection.sendTransaction(tx, [wallet]);
+    await log(`Confirming buy transaction: ${signature}`);
     await connection.confirmTransaction(signature, 'confirmed');
     await log(`Buy successful: ${signature}`);
     return signature;
@@ -539,27 +514,40 @@ async function executeBuy(tokenMint: PublicKey, wallet: Keypair): Promise<string
 
 // Execute sell swap with priority fee
 async function executeSell(tokenMint: PublicKey, amount: number, wallet: Keypair): Promise<boolean> {
-  return await retry(async () => {
+  const result = await retry(async () => {
+    await log(`Starting sell for ${tokenMint.toString()}`);
     const quote = await getSwapQuote(tokenMint, amount / 1e9);
     if (!quote) return false;
 
+    const pool = { mint: tokenMint }; // Placeholder: Replace with actual pool
+    const quoteAmount = await pumpAmmSdk.swapAutocompleteQuoteFromBase(
+      pool,
+      amount * 1e9,
+      500,
+      Direction.BaseToQuote
+    );
     const priorityFee = await getDynamicPriorityFee();
+    await log(`Preparing transaction with priority fee: ${priorityFee}`);
+    const swapInstructions = await pumpAmmSdk.swapInstructions(
+      pool,
+      quoteAmount,
+      500,
+      Direction.BaseToQuote,
+      wallet.publicKey
+    );
     const tx = new Transaction().add(
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-      await pumpSwapSDK.swap({
-        tokenMint,
-        amountIn: amount * 1e9,
-        minAmountOut: quote.minAmountOut,
-        slippageBps: 500,
-        isSell: true,
-      })
+      ...swapInstructions
     );
 
+    await log(`Sending sell transaction for ${tokenMint.toString()}`);
     const signature = await connection.sendTransaction(tx, [wallet]);
+    await log(`Confirming sell transaction: ${signature}`);
     await connection.confirmTransaction(signature, 'confirmed');
     await log(`Sell successful: ${signature}`);
     return true;
   });
+  return result !== null ? result : false;
 }
 
 // Monitor and sell active trades
@@ -628,14 +616,6 @@ async function snipeToken(tokenMint: PublicKey) {
   const quote = await getSwapQuote(tokenMint, buyAmountSol);
   if (!quote) return;
 
-  const sentimentScore = 0.5; // Placeholder for actual sentiment score
-  const holderCount = 50; // Placeholder for actual holder count
-  const aiScore = await predictTokenSuccess(quote.liquidity / 1e9, holderCount, sentimentScore);
-  if (aiScore < aiModelWeight) {
-    await log(`Skipping ${tokenMint.toString()}: AI prediction score ${aiScore} below threshold ${aiModelWeight}`);
-    return;
-  }
-
   const wallet = walletManager.getWallet();
   const buyTx = await executeBuy(tokenMint, wallet);
   if (buyTx) {
@@ -649,7 +629,6 @@ async function main() {
   await loadConfig();
   watchConfig();
   await loadCreatorScores();
-  await loadAIModel();
   await walletManager.updateBalances();
   monitorTrades().catch(error => log(`Trade monitor error: ${error}`));
   monitorTrendingCoins().catch(error => log(`Trending coin monitor error: ${error}`));
