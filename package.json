@@ -1,13 +1,22 @@
 {
   "name": "jimsbot",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Solana sniping bot for Pump.fun",
+  "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "ts-node index.ts",
+    "build": "tsc"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs"
+  "dependencies": {
+    "@pump-fun/pump-swap-sdk": "^0.0.1-beta.32",
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.2",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "sentiment": "^5.0.2",
+    "twilio": "^5.2.2",
+    "typescript": "^5.5.4",
+    "ts-node": "^10.9.2",
+    "@tensorflow/tfjs-node": "^4.22.0"
+  }
 }
