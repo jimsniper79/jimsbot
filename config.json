@@ -1,0 +1,19 @@
+{
+     "buyAmountSol": 0.1,
+     "sellTargetSol": 1.5,
+     "stopLossPercent": 50,
+     "timeoutMinutes": 15,
+     "trailingStopPercent": 10,
+     "priorityFeeMicroLamports": 10000,
+     "xSearchIntervalMinutes": 5,
+     "xSentimentThreshold": 0.5,
+     "minCreatorScore": 0.5,
+     "aiModelWeight": 0.8,
+     "analyticsIntervalMinutes": 5,
+     "emergencyStop": false,
+     "twilioEnabled": false,
+     "blacklistMints": [],
+     "blacklistCreators": [],
+     "whitelistMints": [],
+     "wallets": ["your_wallet_private_key_base64"]
+   }
